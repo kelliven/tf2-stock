@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TF2 주식시장</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #1b1714; color: #ece3d3; font: 14px/1.4 "Segoe UI", "Malgun Gothic", sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; background: #2a221d; border-bottom: 3px solid #cf6a32; }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: 1px; color: #f0b27a; }
+  #status { color: #a8998a; font-size: 12px; }
+  #wrap { display: flex; min-height: calc(100vh - 50px); }
+  aside { width: 240px; flex: none; background: #231d19; border-right: 1px solid #3a302a; }
+  .stock { padding: 10px 14px; border-bottom: 1px solid #332a24; cursor: pointer; }
+  .stock:hover { background: #2e2621; }
+  .stock.sel { background: #3a2c22; border-left: 3px solid #cf6a32; padding-left: 11px; }
+  .stock .top { display: flex; justify-content: space-between; font-weight: bold; }
+  .stock .sub { display: flex; justify-content: space-between; color: #a8998a; font-size: 12px; }
+  main { flex: 1; min-width: 0; padding: 12px 16px; }
+  #head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+  #head .sym { font-size: 24px; font-weight: bold; }
+  #head .name { color: #a8998a; }
+  #head .price { font-size: 24px; font-weight: bold; }
+  #tools { margin: 8px 0; }
+  #tools button { background: #2e2621; color: #ece3d3; border: 1px solid #4a3d34; padding: 4px 10px; margin-right: 4px; cursor: pointer; }
+  #tools button.on { background: #cf6a32; border-color: #cf6a32; color: #fff; }
+  #ohlc { height: 18px; font-size: 12px; color: #a8998a; }
+  #chart { width: 100%; background: #201a16; border: 1px solid #3a302a; }
+  #chart svg { display: block; }
+  .grid { stroke: #342b25; stroke-width: 1; }
+  .ax { fill: #8d7f72; font-size: 11px; }
+  .last { stroke: #cf6a32; stroke-dasharray: 4 3; }
+  .ma { fill: none; stroke: #f0b27a; stroke-width: 1.2; opacity: .8; }
+  .cross { stroke: #6d5f54; stroke-dasharray: 2 2; }
+  .empty { padding: 60px; text-align: center; color: #8d7f72; }
+  .row { display: flex; gap: 16px; margin-top: 14px; }
+  .row section { flex: 1; min-width: 0; background: #231d19; border: 1px solid #3a302a; padding: 8px 10px; }
+  h2 { margin: 0 0 6px; font-size: 14px; color: #f0b27a; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  td { padding: 3px 4px; border-bottom: 1px solid #2e2621; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+  td.r { text-align: right; }
+  .up { color: #e5484d; }
+  .down { color: #3b82f6; }
+  body.motd header { padding: 6px 12px; }
+  body.motd aside { width: 190px; }
+  body.motd .stock { padding: 7px 10px; }
+  @media (max-width: 760px) {
+    #wrap { flex-direction: column; }
+    aside { width: auto; display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid #3a302a; }
+    .stock { min-width: 150px; border-bottom: 0; border-right: 1px solid #332a24; }
+    .row { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+<header><h1>TF2 주식시장</h1><span id="status">불러오는 중...</span></header>
+<div id="wrap">
+  <aside id="list"></aside>
+  <main>
+    <div id="head"></div>
+    <div id="tools">
+      <button data-iv="60">1분</button><button data-iv="300" class="on">5분</button><button data-iv="900">15분</button><button data-iv="3600">1시간</button><button data-iv="14400">4시간</button>
+    </div>
+    <div id="ohlc"></div>
+    <div id="chart"></div>
+    <div class="row">
+      <section><h2>최근 체결</h2><table id="trades"></table></section>
+      <section><h2>수익률 순위</h2><table id="leaders"></table></section>
+    </div>
+  </main>
+</div>
+<script src="config.js"></script>
+<script>
+/* TF2 MOTD 내장 브라우저도 고려해 ES5 문법과 XMLHttpRequest만 쓴다. 외부 스크립트는 없다. */
+(function () {
+  var UP = '#e5484d', DOWN = '#3b82f6';
+  var HOURS = { 60: 6, 300: 24, 900: 72, 3600: 168, 14400: 168 };
+  var state = { symbol: param('symbol').toUpperCase(), interval: 300, stocks: [], candles: [], step: 0, summary: null };
+  /* 정적 모드: config.js가 STOCK_DATA_URL을 주면 publish_github.py가 올린 JSON을 읽는다. 5분봉만 있다. */
+  var DATA = window.STOCK_DATA_URL || '';
+
+  if (param('motd') === '1') { document.body.className = 'motd'; }
+  if (DATA) { $('tools').getElementsByTagName('button')[0].style.display = 'none'; }
+
+  function param(name) {
+    var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function num(n, d) {
+    var s = Number(n).toFixed(d || 0).split('.');
+    s[0] = s[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return s.join('.');
+  }
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+  function hm(t) { var d = new Date(t * 1000); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  function md(t) { var d = new Date(t * 1000); return (d.getMonth() + 1) + '/' + d.getDate(); }
+  function cls(v) { return v >= 0 ? 'up' : 'down'; }
+  function signed(v, d) { return (v >= 0 ? '+' : '') + num(v, d); }
+  function status(text) { $('status').innerHTML = esc(text); }
+
+  function get(url, cb) {
+    var x = new XMLHttpRequest();
+    x.open('GET', url, true);
+    x.onreadystatechange = function () {
+      if (x.readyState !== 4) { return; }
+      if (x.status === 200) {
+        var data;
+        try { data = JSON.parse(x.responseText); } catch (e) { status('응답 해석 실패'); return; }
+        cb(data);
+      } else {
+        status('서버 응답 ' + x.status);
+      }
+    };
+    x.send();
+  }
+
+  /* ---------- 종목 목록 ---------- */
+  function bust() { return '?t=' + Math.floor(new Date().getTime() / 60000); }
+
+  function loadStocks(then) {
+    get(DATA ? DATA + 'summary.json' + bust() : '/api/stocks', function (d) {
+      if (DATA) { state.summary = d; }
+      state.stocks = d.stocks;
+      if (!state.symbol && d.stocks.length) { state.symbol = d.stocks[0].symbol; }
+      renderList();
+      renderHead();
+      status('갱신 ' + hm(d.now) + (DATA ? ' (5분마다)' : ''));
+      if (then) { then(); }
+    });
+  }
+
+  function renderList() {
+    var h = [];
+    for (var i = 0; i < state.stocks.length; i++) {
+      var s = state.stocks[i];
+      h.push('<div class="stock' + (s.symbol === state.symbol ? ' sel' : '') + '" data-sym="' + esc(s.symbol) + '">' +
+        '<div class="top"><span>' + esc(s.symbol) + '</span><span>' + num(s.price, 2) + '</span></div>' +
+        '<div class="sub"><span>' + esc(s.name) + '</span><span class="' + cls(s.changePct) + '">' + signed(s.changePct, 2) + '%</span></div></div>');
+    }
+    $('list').innerHTML = h.join('') || '<div class="empty">종목 없음</div>';
+  }
+
+  function current() {
+    for (var i = 0; i < state.stocks.length; i++) {
+      if (state.stocks[i].symbol === state.symbol) { return state.stocks[i]; }
+    }
+    return null;
+  }
+
+  function renderHead() {
+    var s = current();
+    if (!s) { $('head').innerHTML = ''; return; }
+    var diff = s.price - s.dayOpen;
+    $('head').innerHTML = '<span class="sym">' + esc(s.symbol) + '</span><span class="name">' + esc(s.name) + '</span>' +
+      '<span class="price ' + cls(diff) + '">' + num(s.price, 2) + '</span>' +
+      '<span class="' + cls(diff) + '">' + signed(diff, 2) + ' (' + signed(s.changePct, 2) + '%)</span>' +
+      '<span class="name">오늘 거래량 ' + num(s.volume) + '주</span>';
+  }
+
+  /* ---------- 차트 ---------- */
+  function loadCandles() {
+    if (!state.symbol) { return; }
+    if (DATA) {
+      get(DATA + 'candles_' + encodeURIComponent(state.symbol) + '.json' + bust(), function (d) {
+        if (d.symbol !== state.symbol) { return; }
+        state.candles = regroup(d.candles, state.interval, HOURS[state.interval]);
+        drawChart();
+      });
+      return;
+    }
+    var url = '/api/candles?symbol=' + encodeURIComponent(state.symbol) + '&interval=' + state.interval + '&hours=' + HOURS[state.interval];
+    get(url, function (d) {
+      if (d.symbol !== state.symbol) { return; }
+      state.candles = d.candles;
+      drawChart();
+    });
+  }
+
+  function regroup(src, iv, hours) {
+    var since = new Date().getTime() / 1000 - hours * 3600, out = [], cur = null;
+    for (var i = 0; i < src.length; i++) {
+      var k = src[i];
+      if (k.t < since) { continue; }
+      var t = k.t - k.t % iv;
+      if (!cur || cur.t !== t) {
+        cur = { t: t, o: k.o, h: k.h, l: k.l, c: k.c, v: 0, buy: 0, sell: 0 };
+        out.push(cur);
+      }
+      if (k.h > cur.h) { cur.h = k.h; }
+      if (k.l < cur.l) { cur.l = k.l; }
+      cur.c = k.c;
+      cur.v += k.v; cur.buy += k.buy; cur.sell += k.sell;
+    }
+    return out;
+  }
+
+  function drawChart() {
+    var el = $('chart'), c = state.candles;
+    if (!c.length) { el.innerHTML = '<div class="empty">아직 가격 기록이 없습니다</div>'; $('ohlc').innerHTML = ''; return; }
+
+    var W = el.clientWidth || 800;
+    var H = document.body.className === 'motd' ? 280 : 360;
+    var AXIS_R = 62, AXIS_B = 18, VOL_H = 56, TOP = 10;
+    var plotW = W - AXIS_R, priceH = H - AXIS_B - VOL_H - 6 - TOP;
+    var n = c.length, step = plotW / n, bw = Math.max(1, Math.floor(step * 0.7));
+    var hi = -Infinity, lo = Infinity, vmax = 0, i;
+    for (i = 0; i < n; i++) {
+      if (c[i].h > hi) { hi = c[i].h; }
+      if (c[i].l < lo) { lo = c[i].l; }
+      if (c[i].v > vmax) { vmax = c[i].v; }
+    }
+    var padding = (hi - lo) * 0.08 || hi * 0.01 || 1;
+    hi += padding; lo -= padding;
+    function y(p) { return (TOP + (hi - p) / (hi - lo) * priceH).toFixed(1); }
+    function x(k) { return (k * step + step / 2).toFixed(1); }
+
+    var s = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '">'];
+    for (i = 0; i <= 4; i++) {
+      var gp = lo + (hi - lo) * i / 4, gy = y(gp);
+      s.push('<line class="grid" x1="0" x2="' + plotW + '" y1="' + gy + '" y2="' + gy + '"/>');
+      s.push('<text class="ax" x="' + (plotW + 6) + '" y="' + (Number(gy) + 4) + '">' + num(gp, 2) + '</text>');
+    }
+    var every = Math.max(1, Math.round(n / 6));
+    for (i = 0; i < n; i += every) {
+      if (x(i) < 30 || x(i) > plotW - 30) { continue; }
+      var label = state.interval >= 3600 ? md(c[i].t) + ' ' + hm(c[i].t) : hm(c[i].t);
+      s.push('<text class="ax" text-anchor="middle" x="' + x(i) + '" y="' + (H - 4) + '">' + label + '</text>');
+    }
+
+    var volTop = TOP + priceH + 6;
+    for (i = 0; i < n; i++) {
+      var k = c[i], col = k.c >= k.o ? UP : DOWN;
+      if (vmax > 0 && k.v > 0) {
+        var vh = Math.max(1, k.v / vmax * VOL_H);
+        s.push('<rect x="' + (x(i) - bw / 2) + '" y="' + (volTop + VOL_H - vh) + '" width="' + bw + '" height="' + vh + '" fill="' + col + '" opacity=".35"/>');
+      }
+      s.push('<line x1="' + x(i) + '" x2="' + x(i) + '" y1="' + y(k.h) + '" y2="' + y(k.l) + '" stroke="' + col + '"/>');
+      var top = y(Math.max(k.o, k.c)), bh = Math.max(1, Math.abs(y(k.o) - y(k.c)));
+      s.push('<rect x="' + (x(i) - bw / 2) + '" y="' + top + '" width="' + bw + '" height="' + bh + '" fill="' + col + '"/>');
+    }
+
+    var ma = [], sum = 0;
+    for (i = 0; i < n; i++) {
+      sum += c[i].c;
+      if (i >= 20) { sum -= c[i - 20].c; }
+      if (i >= 19) { ma.push(x(i) + ',' + y(sum / 20)); }
+    }
+    if (ma.length > 1) { s.push('<polyline class="ma" points="' + ma.join(' ') + '"/>'); }
+
+    var last = c[n - 1].c, ly = y(last);
+    s.push('<line class="last" x1="0" x2="' + plotW + '" y1="' + ly + '" y2="' + ly + '"/>');
+    s.push('<rect x="' + (plotW + 1) + '" y="' + (ly - 8) + '" width="' + (AXIS_R - 2) + '" height="16" fill="#cf6a32"/>');
+    s.push('<text x="' + (plotW + 6) + '" y="' + (Number(ly) + 4) + '" fill="#fff" font-size="11">' + num(last, 2) + '</text>');
+    s.push('<line id="cross" class="cross" x1="-10" x2="-10" y1="0" y2="' + (volTop + VOL_H) + '"/>');
+    s.push('</svg>');
+    el.innerHTML = s.join('');
+    state.step = step;
+    showOhlc(n - 1);
+  }
+
+  function showOhlc(i) {
+    var k = state.candles[i];
+    if (!k) { return; }
+    var when = (state.interval >= 3600 ? md(k.t) + ' ' : '') + hm(k.t);
+    $('ohlc').innerHTML = esc(when) + ' &nbsp; 시 ' + num(k.o, 2) + ' &nbsp; 고 ' + num(k.h, 2) +
+      ' &nbsp; 저 ' + num(k.l, 2) + ' &nbsp; 종 <span class="' + cls(k.c - k.o) + '">' + num(k.c, 2) + '</span>' +
+      ' &nbsp; 거래량 ' + num(k.v) + ' (매수 ' + num(k.buy) + ' / 매도 ' + num(k.sell) + ') &nbsp; <span style="color:#f0b27a">— MA20</span>';
+  }
+
+  $('chart').onmousemove = function (e) {
+    if (!state.step) { return; }
+    var r = this.getBoundingClientRect();
+    var i = Math.floor((e.clientX - r.left) / state.step);
+    if (i < 0 || i >= state.candles.length) { return; }
+    var cross = $('cross');
+    if (cross) {
+      var cx = (i * state.step + state.step / 2).toFixed(1);
+      cross.setAttribute('x1', cx);
+      cross.setAttribute('x2', cx);
+    }
+    showOhlc(i);
+  };
+  $('chart').onmouseleave = function () {
+    var cross = $('cross');
+    if (cross) { cross.setAttribute('x1', -10); cross.setAttribute('x2', -10); }
+    showOhlc(state.candles.length - 1);
+  };
+
+  /* ---------- 체결 / 순위 ---------- */
+  function loadTrades() {
+    if (!state.symbol) { return; }
+    if (DATA) {
+      var all = state.summary ? state.summary.trades : [], mine = [];
+      for (var j = 0; j < all.length && mine.length < 15; j++) {
+        if (all[j].symbol === state.symbol) { mine.push(all[j]); }
+      }
+      showTrades({ trades: mine });
+      return;
+    }
+    get('/api/trades?limit=15&symbol=' + encodeURIComponent(state.symbol), showTrades);
+  }
+
+  function showTrades(d) {
+    var h = [];
+    for (var i = 0; i < d.trades.length; i++) {
+      var t = d.trades[i], buy = t.side > 0;
+      h.push('<tr><td>' + hm(t.ts) + '</td><td>' + esc(t.name) + '</td><td class="' + (buy ? 'up' : 'down') + '">' + (buy ? '매수' : '매도') +
+        '</td><td class="r">' + num(t.qty) + '주</td><td class="r">' + num(t.price, 2) + '</td></tr>');
+    }
+    $('trades').innerHTML = h.join('') || '<tr><td>체결 없음</td></tr>';
+  }
+
+  function loadLeaders() {
+    if (DATA) { if (state.summary) { showLeaders(state.summary); } return; }
+    get('/api/leaderboard', showLeaders);
+  }
+
+  function showLeaders(d) {
+    var h = [];
+    for (var i = 0; i < d.leaders.length; i++) {
+      var l = d.leaders[i];
+      h.push('<tr><td>' + (i + 1) + '</td><td>' + esc(l.name) + '</td><td class="r ' + cls(l.pnl) + '">' + signed(l.pnl) + '</td></tr>');
+    }
+    $('leaders').innerHTML = h.join('') || '<tr><td>아직 기록 없음</td></tr>';
+  }
+
+  /* ---------- 이벤트 ---------- */
+  $('list').onclick = function (e) {
+    var t = e.target || e.srcElement;
+    while (t && t !== this && !t.getAttribute('data-sym')) { t = t.parentNode; }
+    if (!t || t === this) { return; }
+    state.symbol = t.getAttribute('data-sym');
+    state.candles = [];
+    renderList(); renderHead(); loadCandles(); loadTrades();
+  };
+
+  var buttons = $('tools').getElementsByTagName('button');
+  for (var b = 0; b < buttons.length; b++) {
+    buttons[b].onclick = function () {
+      for (var j = 0; j < buttons.length; j++) { buttons[j].className = ''; }
+      this.className = 'on';
+      state.interval = parseInt(this.getAttribute('data-iv'), 10);
+      loadCandles();
+    };
+  }
+  window.onresize = drawChart;
+
+  function refresh() {
+    loadStocks(function () { loadCandles(); loadTrades(); if (DATA) { loadLeaders(); } });
+    if (!DATA) { loadLeaders(); }
+  }
+  refresh();
+  setInterval(refresh, DATA ? 60000 : 30000);
+})();
+</script>
+</body>
+</html>
