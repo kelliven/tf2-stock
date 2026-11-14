@@ -209,7 +209,7 @@
     var H = document.body.className === 'motd' ? 280 : 360;
     var AXIS_R = 62, AXIS_B = 18, VOL_H = 56, TOP = 10;
     var plotW = W - AXIS_R, priceH = H - AXIS_B - VOL_H - 6 - TOP;
-    var n = c.length, step = plotW / n, bw = Math.max(1, Math.floor(step * 0.7));
+    var n = c.length, step = plotW / n, bw = Math.max(1, Math.min(14, Math.floor(step * 0.7)));
     var hi = -Infinity, lo = Infinity, vmax = 0, i;
     for (i = 0; i < n; i++) {
       if (c[i].h > hi) { hi = c[i].h; }
